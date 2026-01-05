@@ -1,0 +1,949 @@
+import time
+import sys
+import json
+import os
+import textwrap
+import re
+import random
+from colorama import init, Fore, Style
+
+# --- 顏色與 UI 主題設定 ---
+colors = {"system": Fore.YELLOW, "girl": Fore.MAGENTA, "friend": Fore.CYAN, "stat_up": Fore.GREEN, "stat_down": Fore.RED, "scene": Fore.WHITE, "locked": Style.DIM + Fore.WHITE, "error": Fore.RED + Style.BRIGHT, "prompt": Fore.WHITE, "stat_name": Style.BRIGHT, "inventory": Fore.BLUE, "time": Fore.LIGHTBLUE_EX, "border": Style.DIM, "title": Fore.YELLOW + Style.BRIGHT, "stamina": Fore.GREEN}
+BOX_CHARS = {"tl": "╔", "tr": "╗", "bl": "╚", "br": "╝", "h": "═", "v": "║", "ts": "╤", "bs": "╧", "ls": "╟", "rs": "╢", "cs": "╫"}
+
+# --- 全域設定 ---
+SAVE_FILE = "savegame.json"
+PERIODS = ["上午", "下午", "晚上"]
+STAMINA_RECOVERY_ON_SLEEP = 10 # 晚上睡覺恢復的體力 (已降低)
+
+# --- 輔助函式：計算文字顯示寬度 (中文字算2格) ---
+def get_str_width(s):
+    return sum(2 if ord(c) > 255 else 1 for c in s)
+
+# --- UI 繪製函式 ---
+def draw_box(title, content_lines, width):
+    title_width = get_str_width(title)
+    print(colors["border"] + BOX_CHARS["tl"] + BOX_CHARS["h"] * 2 + f" {colors['title']}{title}{colors['border']} " + BOX_CHARS["h"] * (width - title_width - 5) + BOX_CHARS["tr"] + Style.RESET_ALL)
+    for line in content_lines:
+        clean_line = re.sub(r'\x1b\[[0-9;]*m', '', line)
+        visible_len = get_str_width(clean_line)
+        padding = width - visible_len - 2
+        padding = max(0, padding) # 確保不會是負數
+        print(colors["border"] + BOX_CHARS["v"] + Style.RESET_ALL + f" {line}{' ' * padding}" + colors["border"] + BOX_CHARS["v"] + Style.RESET_ALL)
+    print(colors["border"] + BOX_CHARS["bl"] + BOX_CHARS["h"] * (width - 2) + BOX_CHARS["br"] + Style.RESET_ALL)
+
+def display_girl_profiles():
+    term_width = os.get_terminal_size().columns
+    os.system('cls' if os.name == 'nt' else 'clear')
+    
+    title = "人物設定"
+    lines = ["在遊戲開始前，先來認識一下這幾位角色吧！"]
+    draw_box(title, lines, term_width)
+    input(colors["prompt"] + "按下 Enter 鍵繼續..." + Style.RESET_ALL)
+
+    for girl in GIRL_PROFILES:
+        os.system('cls' if os.name == 'nt' else 'clear')
+        profile_lines = [
+            f"姓名: {girl['name']}",
+            f"性別: {girl['gender']}",
+            f"描述: {girl['description']}",
+            f"愛好: {girl['hobbies']}",
+            f"重視: {girl['focus']}",
+            f"常出沒地點: {girl['location']}"
+        ]
+        draw_box(f"{girl['name']} 的個人檔案", profile_lines, term_width)
+        input(colors["prompt"] + "按下 Enter 鍵查看下一位..." + Style.RESET_ALL)
+
+    os.system('cls' if os.name == 'nt' else 'clear')
+    draw_box("準備開始遊戲", ["你已閱讀完所有角色的設定，準備好開始你的大學校園故事了嗎？"], term_width)
+    input(colors["prompt"] + "按下 Enter 鍵開始遊戲..." + Style.RESET_ALL)
+
+def prepare_state_lines(player, npcs):
+    lines = []
+    stamina_color = colors['stamina'] if player['stamina'] > 30 else colors['error']
+    lines.append(f"💪 {colors['stat_name']}體力:{Style.RESET_ALL} {stamina_color}{player.get('stamina', 0)}/{player.get('max_stamina', 100)}{Style.RESET_ALL} | 💰 {colors['stat_name']}財富:{Style.RESET_ALL} {player['wealth']:<4}元 | 🎓 {colors['stat_name']}智慧:{Style.RESET_ALL} {round(player.get('intelligence', 0), 1)}")
+    lines.append(f"✨ {colors['stat_name']}顏值:{Style.RESET_ALL} {player['appearance']:<4} | 📏 {colors['stat_name']}身高:{Style.RESET_ALL} {player['height']:<4}cm")
+    inventory_text = ', '.join(player['inventory']) if player['inventory'] else '空'
+    lines.append(f"🎒 {colors['stat_name']}背包:{Style.RESET_ALL} {colors['inventory']}{inventory_text}{Style.RESET_ALL}")
+    lines.append(BOX_CHARS["ls"] + BOX_CHARS["h"]*3 + f" {Style.BRIGHT}人物關係{Style.NORMAL} " + BOX_CHARS["h"]*3 + BOX_CHARS["rs"])
+    for girl_profile in GIRL_PROFILES:
+        girl_key = girl_profile["key"]
+        if girl_key in npcs:
+            affection = npcs[girl_key]["affection"]
+            # Use a default color for all girls for now, or define specific colors later
+            lines.append(f"❤️  {colors['girl']}{girl_profile['name']} (好感度): {affection}{Style.RESET_ALL}")
+    return lines
+
+# --- 存檔/讀檔功能 ---
+def save_game(player, npcs, time, scene_id):
+    save_data = {"player_stats": player, "npc_stats": npcs, "time_stats": time, "current_scene_id": scene_id}
+    try:
+        with open(SAVE_FILE, 'w', encoding='utf-8') as f: json.dump(save_data, f, ensure_ascii=False, indent=4)
+    except Exception: pass
+def load_game():
+    if not os.path.exists(SAVE_FILE): return None, None, None, None
+    try:
+        with open(SAVE_FILE, 'r', encoding='utf-8') as f: save_data = json.load(f)
+        return save_data["player_stats"], save_data["npc_stats"], save_data["time_stats"], save_data["current_scene_id"]
+    except Exception: return None, None, None, None
+
+# --- 遊戲資料 ---
+player_stats = {"wealth": 2500, "intelligence": 5, "appearance": 5, "height": 165, "inventory": [], "stamina": 100, "max_stamina": 100, "flags": []}
+GIRL_PROFILES = [
+    {"key": "volleyball_girl", "name": "鹽盤玉", "gender": "女", "affection_key": "volleyball_girl_affection", "description": "喜歡打排球的活潑女孩，與你同系不同班，參加系排的話搞不好會認識到她。", "hobbies": "打排球", "focus": "身高、智慧", "location": "排球場、系排、校園各處"},
+    {"key": "top_student_girl", "name": "舞梓琪", "gender": "女", "affection_key": "top_student_girl_affection", "description": "安靜、喜歡讀書和彈鋼琴的學霸，與你同系不同班，參加鋼琴社或常去圖書館搞不好認識他。", "hobbies": "讀書、彈鋼琴", "focus": "智慧、財富", "location": "圖書館、鋼琴社、校園各處"},
+    {"key": "childhood_friend", "name": "露比", "gender": "女", "affection_key": "childhood_friend_affection", "description": "從小一起長大的朋友，喜歡打電動和出去玩，與你青梅竹馬但很久沒有聯繫，上大學才發現竟然與你同班同學。", "hobbies": "打電動、出去玩", "focus": "身高、顏值", "location": "課堂上、校園各處"},
+    {"key": "part_time_girl", "name": "Selina", "gender": "女", "affection_key": "part_time_girl_affection", "description": "在咖啡廳打工，喜歡甜點的可愛女孩，就讀商設系，如果錢太少去打工的話搞不好會認識他。", "hobbies": "甜點", "focus": "財富、顏值", "location": "咖啡廳、校園各處"},
+    {"key": "boy", "name": "林晨翔", "gender": "男", "affection_key": "boy_affection", "description": "喜好打籃球和健身，有參加系籃，與你在開學週成為朋友，時常一起行動", "hobbies": "打籃球、健身", "focus": "無","location": "籃球場、校園各處"},
+]
+
+npc_stats = {
+    "volleyball_girl": {"affection": 30, "trust": 0},
+    "top_student_girl": {"affection": 30, "trust": 0},
+    "childhood_friend": {"affection": 40, "jealousy": 0}, # 青梅竹馬的初始好感度為20
+    "part_time_girl": {"affection": 30, "trust": 0},
+    "boy": {"affection": 50, "trust": 0},
+}
+# --- 新的時間結構 ---
+DAYS_OF_WEEK = ["一", "二", "三", "四", "五"]
+time_stats = {"week": 1, "day_of_week_index": 0, "period_index": 0} # week, day_index, period_index
+scheduled_events = {
+    "W1_D0": "w1_d0_event", # 週一
+    "W1_D2": "w1_d1_event", # 週三
+    "W1_D4": "w1_d2_event", # 週五
+    "W2_D0": "w2_d0_event", # 第二週週一
+    "W2_D2": "w2_d1_router",# 第二週週三
+    "W3_D0": "w3_d0_router",# 第三週週一
+    "W3_D2": "w3_d1_router",# 第三週週三
+    "W3_D4": "w3_d2_event", # 第三週週五
+    "W4_D0": "w4_d0_event", # 第四週週一
+    "W4_D2": "w4_d1_event", # 第四週週三
+    "W4_D4": "w4_d2_router",# 第四週週五
+    "W5_D0": "w5_d0_event", # 第五週週一
+    "W5_D2": "w5_d1_router",# 第五週週三
+    "W5_D4": "w5_d2_event", # 第五週週五
+    "W6_D0": "w6_midterm_exam" # 第六週週一
+}
+
+story = {
+    # 請在這裡貼上你修改後的劇情
+    # 這是遊戲開始的進入點
+    "game_intro": {
+        "text": "你是一名中原大學電機系大一新生，請開始你的開局",
+        "choices": [{"text": "繼續...", "next_scene": "w1_d0_event"}],
+        "no_time_cost": True
+    },
+
+    # --- 第一週劇情 ---
+    "w1_d0_event": {
+        "text": "台上校長還在致詞，你覺得有點悶。這時旁邊一個膚色黝黑、看起來剛運動完的男生湊過來。\n阿翔：「嘿！哥們，你也是甲班的嗎？我是林晨翔。剛才在外面看到電機系的系牌，感覺這四年我們會過得很硬啊...你有想好要怎麼混...喔不，怎麼過這四年了嗎？」",
+        "choices": [
+            {"text": "打算先認真聽課，電機系聽說很重基礎。", "next_scene": "w1_d0_choice1"},
+            {"text": "想多運動或保養，聽說電機系宅男很多，我不想變那樣。", "next_scene": "w1_d0_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w1_d0_choice1": {
+        "text": "阿翔一臉敬佩：「哇，這就是傳說中的學霸潛力股嗎？那之後微積分可以坐你旁邊嗎？」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3}}}],
+        "no_time_cost": True
+    },
+    "w1_d0_choice2": {
+        "text": "阿翔嘿嘿一笑：「有眼光！我也打算去系籃排或健身房，到時候一起啊！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"appearance": 1}}}],
+        "no_time_cost": True
+    },
+    "w1_d1_event": {
+        "text": "廣場上都是各系的新生，大家都在領傳單。你來到感興趣的攤位前：",
+        "choices": [
+            {"text": "前往「系排球」攤位", "next_scene": "w1_d1_volleyball"},
+            {"text": "前往「鋼琴社」攤位", "next_scene": "w1_d1_piano"}
+        ],
+        "no_time_cost": True
+    },
+    "w1_d1_volleyball": {
+        "text": "你剛靠近排球網，一顆球滾到你腳邊。一個紮著俐落馬尾、穿著運動服的女孩跑過來，她胸前掛著新生名牌，寫著「乙班－妍盤玉」。\n妍盤玉：「同學！那是我的球，可以幫我撿一下嗎？謝啦！...欸？我看你名牌，你也是電機系的喔？我是乙班的盤玉。我們班那群男生都縮在宿舍打電動，你要不要乾脆來跟我們一起打球？大家都是剛開始練，很有趣喔！」",
+        "choices": [
+            {"text": "聽起來不錯，決定加入系排！", "next_scene": "financial_review", "effects": {"player": {"stamina": -20, "max_stamina": 5}, "add_flags": ["met_volleyball_girl", "joined_volleyball_team"], "npcs": {"volleyball_girl": {"affection": 5}}}},
+            {"text": "再考慮看看。", "next_scene": "financial_review", "effects": {"player": {"stamina": -20}, "add_flags": ["met_volleyball_girl"], "npcs": {"volleyball_girl": {"affection": 5}}}}
+        ],
+        "no_time_cost": True
+    },
+    "w1_d1_piano": {
+        "text": "你在攤位旁看到一個正對著社團簡章發呆的女孩。她氣質安靜，名牌上寫著「乙班－舞梓琪」。\n舞梓琪：「（轉頭看到你，愣了一下）...你也是想加入鋼琴社的新生嗎？我剛才問過，他們說琴房這週還沒開放給大一預約...我有在圖書館看到幾本電機系的參考書，正打算過去看。你要去社團，還是去圖書館？」",
+        "choices": [
+            {"text": "決定加入鋼琴社。", "next_scene": "financial_review", "effects": {"player": {"intelligence": 0.3}, "add_flags": ["met_top_student_girl", "joined_piano_club"], "npcs": {"top_student_girl": {"affection": 5}}}},
+            {"text": "還是先專心在課業上好了。", "next_scene": "financial_review", "effects": {"player": {"intelligence": 0.3}, "add_flags": ["met_top_student_girl"], "npcs": {"top_student_girl": {"affection": 5}}}}
+        ],
+        "no_time_cost": True
+    },
+    "financial_review": {
+        "text": "社團的事情決定得差不多了，接下來該規劃一下未來幾週的開銷了。你打開自己的記帳本，回顧上週的花費後，心想…",
+        "choices": [
+            {"text": "一個禮拜的零用金好像有點不夠用......", "next_scene": "financial_choice_poor"},
+            {"text": "剛好足夠，基本開銷沒有問題。", "next_scene": "financial_choice_ok"},
+            {"text": "超級充足！還能存下一些呢。", "next_scene": "daily_router"}
+        ],
+        "no_time_cost": True
+    },
+    "financial_choice_poor": {
+        "text": "你看著空空如也的錢包，決定去咖啡廳打工，為自己增加點收入。",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"add_flags": ["will_work_part_time"]}}],
+        "no_time_cost": True
+    },
+    "financial_choice_ok": {
+        "text": "雖然開銷剛好，但你看著商店裡最新款的遊戲機，心想...",
+        "choices": [
+            {"text": "打工存錢買自己想要的東西。", "next_scene": "financial_choice_ok_yes"},
+            {"text": "感覺好麻煩，先不要好了。", "next_scene": "daily_router"}
+        ],
+        "no_time_cost": True
+    },
+    "financial_choice_ok_yes": {
+        "text": "你決定開始打工，為自己的夢想基金努力。",
+        "choices": [{"text": "繼續...", "next_scene": "coffee_shop_router", "effects": {"add_flags": ["will_work_part_time"]}}],
+        "no_time_cost": True
+    },
+    "w1_d2_event": {
+        "text": "場景： 電機通訊大樓 1 樓教室。你剛找好位置坐下，一個熟悉的身影大搖大擺地走進教室，停在你的課桌旁，手裡還拿著一罐能量飲料。\n露比：「欸...這不是你嗎？我就覺得名字很眼熟，沒想到你竟然跟我同系同班！你是吃了什麼長大的？怎麼跟小時候感覺不太一樣了？」",
+        "choices": [
+            {"text": "露比？妳怎麼也來讀電機？妳不是最討厭數學嗎？", "next_scene": "w1_d2_choice1"},
+            {"text": "（冷靜應對）好久不見，妳倒是一點都沒變，還是很愛玩。", "next_scene": "w1_d2_choice2"}
+        ]
+    },
+    "w1_d2_choice1": {
+        "text": "露比：「喂！別提黑歷史啦！我是為了能設計出更好玩的遊戲才來的。以後實驗課...你懂的，要罩我喔！」",
+        "choices": [{"text": "好啦好啦知道了!", "next_scene": "daily_router", "effects": {"npcs": {"childhood_friend": {"affection": 5}}}}]
+    },
+    "w1_d2_choice2": {
+        "text": "露比：「哼，這叫保有童心！對了，我最近發現一家不錯的電玩店在附近，改天一起去啊？」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"appearance": 1}, "npcs": {"childhood_friend": {"affection": 0}}}}]
+    },
+
+    # --- 第二週劇情 ---
+    "w2_d0_event": {
+        "text": "【物理實驗課的震撼教育】\n場景：基礎科學館實驗室。你正對著一台示波器發呆，螢幕上的波形亂跳，你的實驗記錄本還是一片空白。\n阿翔：「兄弟，這機器是不是壞了啊？我怎麼調都調不出正弦波...欸，那邊那個是露比吧？她好像已經快寫完了，我們要不要去『參考』一下？」",
+        "choices": [
+            {"text": "堅持自己研究，並認真寫報告", "next_scene": "w2_d0_choice1"},
+            {"text": "去找露比求救", "next_scene": "w2_d0_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w2_d0_choice1": {
+        "text": "你埋頭苦幹兩小時。阿翔：「佩服佩服，我先去便利商店買飲料了。」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3, "stamina": -10}}}],
+        "no_time_cost": True
+    },
+    "w2_d0_choice2": {
+        "text": "露比：「（得意地撥頭髮）求我啊！好啦，看在我們認識這麼久的份上，這組數據借你，但下次你要請我喝飲料！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.1}, "npcs": {"childhood_friend": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w2_d1_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w2_d1_interview_event", "conditions": {"player_flags": ["will_work_part_time"]}},
+            {"scene": "w2_d1_customer_event", "conditions": {}}
+        ]
+    },
+    "w2_d1_interview_event": {
+        "text": "【木匠咖啡的打工面試】\n場景：實踐路上的一家質感咖啡廳。你走進店裡應徵工讀生，店長叫另一位剛來不久的新人帶你。\nSelina：「（穿著圍裙，手裡拿著托盤跑過來）嗨！你是來面試的嗎？我是商設系的 Selina，也是這週剛開始打工的大一新生。店長在後面忙，我先帶你認識環境。對了...你是電機系的喔？聽說你們系的人都很聰明，那這台超複雜的義式咖啡機，你應該一下就會修了吧？」",
+        "choices": [
+            {"text": "展現自信，順便誇獎店裡裝潢", "next_scene": "w2_d1_interview_choice1"},
+            {"text": "誠實表示自己只會讀書，機器還得學", "next_scene": "w2_d1_interview_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w2_d1_interview_choice1": {
+        "text": "Selina：「（眼睛一亮）喔？你很有眼光嘛！這牆上的掛畫是我們系學姊設計的喔。看來我們會合作得很愉快！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"wealth": 500}, "add_flags": ["met_selina"], "npcs": {"part_time_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w2_d1_interview_choice2": {
+        "text": "Selina：「哈哈，也是啦。別緊張，我也是第一次用，那我們一起研究怎麼弄出完美的拉花吧！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"wealth": 500, "intelligence": 0.3}, "npcs": {"part_time_girl": {"affection": 5}}, "add_flags": ["met_selina"]}}],
+        "no_time_cost": True
+    },
+    "w2_d1_customer_event": {
+        "text": "【木匠咖啡的午後時光】\n場景：你拿著零用金來到實踐路的木匠咖啡。店內很安靜，只有幾位學生在讀書。\nSelina：「（拿著菜單走過來）歡迎光臨！我是今天的值班生 Selina。嘿...你是電機系的吧？我看你拿著那本超厚原文預習書。既然是同學，我幫你推薦，今天要不要試試看我們最新出的草莓千層？這可是我最喜歡的喔！」",
+        "choices": [
+            {"text": "點一份昂貴的甜點套餐 (財富-200)", "next_scene": "w2_d1_customer_choice1"},
+            {"text": "只點一杯黑咖啡並開始讀書", "next_scene": "w2_d1_customer_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w2_d1_customer_choice1": {
+        "text": "Selina 眼睛一亮：「喔！有品味！那這份蛋糕我幫你畫個可愛的圖案。慢慢享受喔，電機系帥哥。」",
+        "effects": {"player": {"wealth": -200, "appearance": 1}, "npcs": {"part_time_girl": {"affection": 5}}, "add_flags": ["met_selina"]},
+        "choices": [{"text": "繼續...", "next_scene": "daily_router"}],
+        "no_time_cost": True
+    },
+    "w2_d1_customer_choice2": {
+        "text": "Selina 吐了個舌頭：「果然電機系的人都很嚴肅。那我不吵你了，需要加水再叫我。」",
+        "effects": {"player": {"intelligence": 1}, "add_flags": ["met_selina"]},
+        "choices": [{"text": "繼續...", "next_scene": "daily_router"}],
+        "no_time_cost": True
+    },
+
+    # --- 第三週劇情 ---
+    "w3_d0_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w3_d0_pass", "conditions": {"min_stats": {"intelligence": 6.5}}},
+            {"scene": "w3_d0_fail", "conditions": {}}
+        ]
+    },
+    "w3_d0_pass": {
+        "text": "【週一：普物實驗報告發還 — 幾家歡樂幾家愁】\n基礎科學館的走廊，助教把改好的普物實驗報告放在桌上讓大家領取。\n阿翔：「（哀嚎）不是吧！我寫得這麼辛苦才拿 60 分？那助教說我的誤差分析根本是在寫小說...兄弟，你幾分？」\n你拿到了 85 分。舞梓琪剛好走過，斜眼看了一下你的分數：「（語氣平淡但帶點認可）數據處理得不錯，看來你沒在課堂上睡覺。」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3}, "npcs": {"top_student_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w3_d0_fail": {
+        "text": "【週一：普物實驗報告發還 — 幾家歡樂幾家愁】\n基礎科學館的走廊，助教把改好的普物實驗報告放在桌上讓大家領取。\n阿翔：「（哀嚎）不是吧！我寫得這麼辛苦才拿 60 分？那助教說我的誤差分析根本是在寫小說...兄弟，你幾分？」\n你只拿到了 55 分。\n露比跑過來拍拍你：「沒關係啦，我也沒及格，我們真的是電機系的難兄難弟。走！去吃大門口的炸雞安慰一下。」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"stamina": 10}, "npcs": {"childhood_friend": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w3_d1_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w3_d1_work_event", "conditions": {"player_flags": ["will_work_part_time"]}},
+            {"scene": "w3_d1_social_router", "conditions": {}}
+        ]
+    },
+    "w3_d1_work_event": {
+        "text": "【咖啡廳的深夜趕稿】\n木匠咖啡廳。晚上九點，店裡沒什麼客人，只有Selina趴在櫃檯旁，對著一大疊圖稿嘆氣。\nSelina：「（抬頭看到你，眼神疲憊）啊，你來啦。不好意思，我今天可能沒什麼體力跟你聊天...我們商設系的大一設計課要交作業了，我畫了十幾個草圖都被老師退件...你們電機系的作業雖然難，但至少有標準答案，對吧？」",
+        "choices": [
+            {"text": "幫她收拾桌子，讓她專心畫畫", "next_scene": "w3_d1_work_choice1"},
+            {"text": "展現電機系的邏輯，幫她分析構圖", "next_scene": "w3_d1_work_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w3_d1_work_choice1": {
+        "text": "Selina：「謝謝你，你人真好。等我這週過完，我一定要請你吃我們系上最有名的歐姆蛋！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"wealth": 500, "stamina": -10}, "npcs": {"part_time_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w3_d1_work_choice2": {
+        "text": "你試圖用黃金比例解釋。Selina 噗哧一笑：「雖然聽不懂你在說什麼，但感覺很有趣，謝謝你的鼓勵啦！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3, "stamina": -20}, "npcs": {"part_time_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w3_d1_social_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w3_d1_social_volleyball", "conditions": {"player_flags": ["joined_volleyball_team"]}},
+            {"scene": "w3_d1_social_piano", "conditions": {"player_flags": ["joined_piano_club"]}},
+            {"scene": "w3_d1_social_dorm", "conditions": {}}
+        ]
+    },
+    "w3_d1_social_volleyball": {
+        "text": "【社團例會與額外的練習】\n下午沒課，你提早來到排球場。妍盤玉正一個人在練習對牆擊球。\n妍盤玉：「嘿！你今天不用打工喔？太好了，幫我餵球好嗎？我想練習接發球，練完我請你喝運動飲料！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"stamina": -20, "max_stamina": 5}, "npcs": {"volleyball_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w3_d1_social_piano": {
+        "text": "【社團例會與額外的練習】\n下午沒課，琴房剛好沒人，你坐下練習。這時 舞梓琪 推門進來。\n舞梓琪：「...沒想到除了我，還有人會在這個時間過來。你剛才彈的那段指法有點問題，要我示範一次嗎？」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3}, "npcs": {"top_student_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w3_d1_social_dorm": {
+        "text": "【社團例會與額外的練習】\n下午沒課，在門口遇到準備出門的 露比。\n露比：「欸！你今天怎麼這麼閒？剛好，我的 Switch 手把壞了，你陪我去中原商圈修，順便幫我挑新的保護殼！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"appearance": 1}, "npcs": {"childhood_friend": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w3_d2_event": {
+        "text": "【新生盃預賽的邀約】\n傍晚下課，你正猶豫要去哪，手機跳出兩條訊息。\n訊息 1 (妍盤玉): 「今天我們班要跟甲班打友誼賽，缺個記錄員，順便幫我加油，有空過來嗎？」\n訊息 2 (阿翔): 「兄弟！我剛在健身房遇到露比，她說想去買保養品順便逛中原夜市，叫我問你要不要一起？」",
+        "choices": [
+            {"text": "前往排球場（支持妍盤玉）", "next_scene": "w3_d2_choice1"},
+            {"text": "前往夜市（陪露比與阿翔）", "next_scene": "w3_d2_choice2"}
+        ]
+    },
+    "w3_d2_choice1": {
+        "text": "比賽結束後，盤玉滿頭大汗地跑向你。「謝啦！剛才那球扣殺帥吧？雖然我只是大一新生，但我一定會變強的！你要不要也來試試看接這球？」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"stamina": -25}, "npcs": {"volleyball_girl": {"affection": 5}}}}]
+    },
+    "w3_d2_choice2": {
+        "text": "露比在藥妝店挑選面膜。「欸，你覺得這個包裝好看，還是那個？...算了，反正你這個直男肯定不懂，選你覺得帥的那個好了！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"appearance": 1, "stamina": 5}, "npcs": {"childhood_friend": {"affection": 5}}}}]
+    },
+
+    # --- 第四週劇情 ---
+    "w4_d0_event": {
+        "text": "【週一：圖書館的「位子爭奪戰」】\n早上八點的張靜愚紀念圖書館門口，還沒開門就排滿了人。你遠遠看到舞梓琪已經站在隊伍最前面，低頭看著英文單字卡。\n舞梓琪：「（看到你走近，微微抬頭）你也這麼早來？...電機系的微積分跟電路學如果不提前兩週準備，通常會寫不完。我幫我朋友佔了位子，但她好像不來了，你要坐我旁邊嗎？但...不准發出聲音。」",
+        "choices": [
+            {"text": "坐在她旁邊認真讀書（不進食模式）", "next_scene": "w4_d0_choice1"},
+            {"text": "算了，去地下室跟阿翔邊聊天邊讀", "next_scene": "w4_d0_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w4_d0_choice1": {
+        "text": "兩人相對無言讀了四小時。舞梓琪起步離開時，在你桌上貼了張便利貼：『這題電路分析你算錯了。』",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3, "stamina": -30}, "npcs": {"top_student_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w4_d0_choice2": {
+        "text": "阿翔：「兄弟，剛才那邊那個正妹是在約你嗎？你竟然拒絕？佩服佩服，來，我們來討論待會午餐吃哪家御飯糰。」",
+        "effects": {"player": {"intelligence": 0.1, "stamina": 5}, "npcs": {"top_student_girl": {"affection": 5}}},
+        "choices": [{"text": "繼續...", "next_scene": "daily_router"}],
+        "no_time_cost": True
+    },
+    "w4_d1_event": {
+        "text": "【週三：考古題的誘惑 — 教室裡的騷動】\n電路學課間休息，大家都在傳閱學長姐留下來的「考古題」。露比拿著手機，一臉糾結地看著你。\n露比：「欸...[主角名]，怎麼辦啦！這份考古題我連題目都看不懂，這學期是不是要涼了？你有沒有認識什麼厲害的人可以教我？...還是，你這週末可以來我家，我們一起研究？我有買新的提神飲料喔！」",
+        "choices": [
+            {"text": "答應露比，週末一起讀書（青梅竹馬路線）", "next_scene": "w4_d1_choice1"},
+            {"text": "拒絕，表示自己也還沒讀完（專注自我路線）", "next_scene": "w4_d1_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w4_d1_choice1": {
+        "text": "露比開心地拍你手：「就等你這句話！放心，我會準備好零食的，雖然...可能都是垃圾食物。」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3}, "npcs": {"childhood_friend": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w4_d1_choice2": {
+        "text": "露比噘嘴：「哼，果然上了大學就變冷淡了。那我去找別班的同學問好了...」",
+        "effects": {"player": {"intelligence": 0.3, "stamina": -10}, "npcs": {"childhood_friend": {"affection": 5}}},
+        "choices": [{"text": "繼續...", "next_scene": "daily_router"}],
+        "no_time_cost": True
+    },
+    "w4_d2_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w4_d2_work_event", "conditions": {"player_flags": ["will_work_part_time"]}},
+            {"scene": "w4_d2_customer_event", "conditions": {}}
+        ]
+    },
+    "w4_d2_work_event": {
+        "text": "【週五：咖啡廳的考前K書潮】\n晚上你在木匠咖啡打工，店裡坐滿了帶著筆電和原文書的學生。Selina 忙著送餐，看到你正趁空檔翻開課本。\nSelina：「（遞給你一小塊蛋糕邊角料）辛苦啦，電機系的高材生。我看今天店裡一半的人都在算你們那種奇怪的數學符號。對了，這塊是剛才切壞的布朗尼，送你吃。看你這幾天黑眼圈這麼重，要注意顏值啊，不然客人會被你嚇跑喔～」",
+        "choices": [
+            {"text": "謝謝她的甜點並稍微整理儀容（保養）", "next_scene": "w4_d2_work_choice1"},
+            {"text": "婉拒甜點，專心研究電路圖（不進食模式）", "next_scene": "w4_d2_work_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w4_d2_work_choice1": {
+        "text": "Selina 滿意地點頭：「這才對嘛！長得帥的人就算在算數學，看起來也比較像在拍戲。加油啦！」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"appearance": 0.3, "stamina": 10, "wealth": 500}, "npcs": {"part_time_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w4_d2_work_choice2": {
+        "text": "Selina 嘆了口氣：「真是木頭...算了，那這塊我自己吃囉。你慢慢鑽研你的科學奧秘吧。」",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3, "stamina": -30, "wealth": 500}, "npcs": {"part_time_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w4_d2_customer_event": {
+        "text": "【週五：咖啡廳的考前K書潮】\n圖書館已經擠爆了，你拿著充足的零用金來到木匠咖啡館找位子。店內人山人海，Selina 正穿梭在桌椅間忙得不可開交。\nSelina：「（看到你進門，驚訝地揮手）嘿！是你啊！今天全校的人都跑來我們店裡讀書了。看在你是『常客』的份上，我幫你留了最後一個靠窗的安靜位子，快過來！」",
+        "choices": [
+            {"text": "點一份精緻的「考前衝刺套餐」（金錢 -250）", "next_scene": "w4_d2_customer_choice1"},
+            {"text": "只點基本消費，迅速進入讀書狀態（智慧路線）", "next_scene": "w4_d2_customer_choice2"}
+        ],
+        "no_time_cost": True
+    },
+    "w4_d2_customer_choice1": {
+        "text": "Selina 送餐時悄悄在你的拿鐵上拉了一個「加油」的心形。",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"wealth": -250, "stamina": 15}, "npcs": {"part_time_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w4_d2_customer_choice2": {
+        "text": "雖然咖啡廳有點吵，但你強迫自己專注在複雜的電路圖中。",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.4, "stamina": -10, "wealth": -120}}}],
+        "no_time_cost": True
+    },
+    # --- 第五週劇情 ---
+    "w5_d0_event": {
+        "text": "【週一：地獄式的熬夜預習】\n凌晨兩點，你的桌燈依然亮著。眼前是複雜的麥斯威爾方程式。",
+        "choices": [
+            {"text": "不進食，拼死讀書（智慧最大化）", "next_scene": "w5_d0_result1"},
+            {"text": "認真保養與休息，維持體力", "next_scene": "w5_d0_result2"}
+        ],
+        "no_time_cost": True
+    },
+    "w5_d0_result1": {
+        "text": "你忍著飢餓，終於解開了去年的考古大題。",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"intelligence": 0.3, "stamina": -30}}}]
+    },
+    "w5_d0_result2": {
+        "text": "你決定充足睡眠。雖然進度慢一點，但精神很好。",
+        "choices": [{"text": "繼續...", "next_scene": "daily_router", "effects": {"player": {"appearance": 0.3, "stamina": 10, "intelligence": -0.2}}}]
+    },
+    "w5_d1_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w5_d1_selina_event", "conditions": {"player_flags": ["met_selina"]}},
+            {"scene": "w5_d1_ruby_event", "conditions": {}}
+        ],
+        "no_time_cost": True
+    },
+    "w5_d1_selina_event": {
+        "text": "【週三：系館的咖啡補給】\n你回學校拿筆記，遇到 阿翔 正提著兩袋飲料。\n阿翔：「兄弟，看你臉色不太好喔。對了，剛才在校門口遇到 Selina，她叫我把這瓶提神飲料給你，說電機系的人別在考前就掛掉了。」",
+        "choices": [
+            {"text": "立刻喝掉並繼續讀書（智慧路線）", "effects": {"player": {"intelligence": 0.3, "stamina": 5}, "npcs": {"part_time_girl": {"affection": 5}}}, "next_scene": "daily_router"},
+            {"text": "先回宿舍保養，怕考完臉爛掉（顏值路線）", "effects": {"player": {"appearance": 0.3, "intelligence": -0.2}, "npcs": {"part_time_girl": {"affection": 5}}}, "next_scene": "daily_router"}
+        ]
+    },
+    "w5_d1_ruby_event": {
+        "text": "【週三：系館的咖啡補給】\n你回學校拿筆記，遇到 阿翔 正提著兩袋飲料。\n阿翔：「兄弟，看你臉色不太好喔。對了，剛才在校門口遇到 露比，她叫我把這瓶提神飲料給你，說電機系的人別在考前就掛掉了。」",
+        "choices": [
+            {"text": "立刻喝掉並繼續讀書（智慧路線）", "effects": {"player": {"intelligence": 0.3, "stamina": 5}, "npcs": {"childhood_friend": {"affection": 5}}}, "next_scene": "daily_router"},
+            {"text": "先回宿舍保養，怕考完臉爛掉（顏值路線）", "effects": {"player": {"appearance": 0.3, "intelligence": -0.2}, "npcs": {"childhood_friend": {"affection": 5}}}, "next_scene": "daily_router"}
+        ]
+    },
+    "w5_d2_event": {
+        "text": "【週五：期中考前的崩潰與安慰】\n考前最後一個晚上。你感覺大腦快要炸裂了。",
+        "choices": [
+            {"text": "打電話給舞梓琪對答案", "next_scene": "w5_d2_result1"},
+            {"text": "跟露比語音連線舒壓", "next_scene": "w5_d2_result2"}
+        ],
+        "no_time_cost": True
+    },
+    "w5_d2_result1": {
+        "text": "梓琪在電話那頭聲音微弱：「...我也剛算完第三遍。既然你答案跟我一樣，應該沒問題了。明天見。」",
+        "choices": [{"text": "繼續...", "next_scene": "week_6_intro", "effects": {"player": {"intelligence": 0.3}, "npcs": {"top_student_girl": {"affection": 5}}}}]
+    },
+    "w5_d2_result2": {
+        "text": "露比：「哎呀別讀了啦！我們班那個誰已經決定放棄微積分了，你有讀一點就很強了。加油啦，考完我帶你去吃大餐！」",
+        "choices": [{"text": "繼續...", "next_scene": "week_6_intro", "effects": {"player": {"stamina": 20, "intelligence": -0.2}, "npcs": {"childhood_friend": {"affection": 5}}}}]
+    },
+    "week_6_intro": {
+        "text": "🏁 期中考大判定\n現在，請檢視你的主角屬性。你準備好進入 第六週：期中考現場 了嗎？",
+        "choices": [{"text": "準備好了！", "next_scene": "daily_router"}],
+        "no_time_cost": True
+    },
+
+    # --- 第六週劇情 ---
+    "w6_midterm_exam": {
+        "text": "📝 第一階段：微積分與電路學卷子\n電學大樓 105 教室。助教面無表情地發下卷子，整間教室只剩下原子筆尖摩擦紙張的聲音。",
+        "choices": [
+            {"text": "繼續...", "next_scene": "w6_exam_intelligence_router"}
+        ],
+        "no_time_cost": True
+    },
+    "w6_exam_intelligence_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w6_exam_pass_high", "conditions": {"min_stats": {"intelligence": 11}}},
+            {"scene": "w6_exam_pass_mid", "conditions": {"min_stats": {"intelligence": 7}}},
+            {"scene": "w6_exam_fail", "conditions": {}}
+        ]
+    },
+    "w6_exam_pass_high": {
+        "text": "你寫得非常順手，連最後一題加分題都輕鬆解出。\n提早交卷時，坐在斜後方的 舞梓琪 驚訝地抬頭看了你一眼。考後她在走廊攔住你：「那題非線性電路...你算出來的答案是 √2 嗎？」得到肯定回答後，她露出了罕見的微笑。",
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_phase2_intro", "effects": {"npcs": {"top_student_girl": {"affection": 5}}, "add_flags": ["passed_midterm"]}}],
+        "no_time_cost": True
+    },
+    "w6_exam_pass_mid": {
+        "text": "雖然有些題目不太確定，但靠著前幾週的努力，你寫完了大部分。\n下課後你與 阿翔 對答案，發現錯了一兩題。露比 跑過來拍拍你：「沒關係啦！有寫完就贏過一半的人了，我們去買杯飲料壓壓驚！」",
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_phase2_intro", "effects": {"npcs": {"childhood_friend": {"affection": 5}}, "add_flags": ["passed_midterm"]}}],
+        "no_time_cost": True
+    },
+    "w6_exam_fail": {
+        "text": "考卷一半以上都是空白，大腦一片漿糊。\n你失魂落魄地走出教室，舞梓琪 經過你身邊時嘆了口氣，欲言又止。",
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_phase2_intro", "effects": {"player": {"stamina": -10}, "npcs": {"top_student_girl": {"affection": 5}}}}],
+        "no_time_cost": True
+    },
+    "w6_exam_phase2_intro": {
+        "text": "🔋 第二階段：身體狀況與精神力\n連續三天的考試結束後，你站在教學大樓門口，陽光刺眼。",
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_stamina_router"}],
+        "no_time_cost": True
+    },
+    "w6_exam_stamina_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w6_stamina_high", "conditions": {"min_stats": {"stamina": 60}}},
+            {"scene": "w6_stamina_low", "conditions": {"max_stats": {"stamina": 20}}},
+            {"scene": "w6_stamina_normal", "conditions": {}}
+        ]
+    },
+    "w6_stamina_high": {
+        "text": "考完試你依然精神抖擻，甚至想去跑個兩圈。\n妍盤玉 揹著球袋出現，用力拍你的背：「考完啦！看你還很有精神嘛，球場缺一個攔網的，走啦！」",
+        "effects": {"npcs": {"volleyball_girl": {"affection": 5}}},
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_phase3_intro"}],
+        "no_time_cost": True
+    },
+    "w6_stamina_low": {
+        "text": "你臉色蒼白，差點在樓梯口絆倒。\nSelina 正好送外送來到電機系，趕緊扶住你。「天啊！你的黑眼圈也太重了吧？電機系是在虐待學生嗎？快，這罐現打果汁給你，算我請客！」",
+        "effects": {"npcs": {"part_time_girl": {"affection": 5}}},
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_phase3_intro"}],
+        "no_time_cost": True
+    },
+    "w6_stamina_normal": {
+        "text": "你感覺有點累，但還撐得住。",
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_phase3_intro"}],
+        "no_time_cost": True
+    },
+    "w6_exam_phase3_intro": {
+        "text": "✨ 第三階段：社交與魅力回饋\n考後的週末，校園氛圍放鬆了不少。",
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_appearance_router"}],
+        "no_time_cost": True
+    },
+    "w6_exam_appearance_router": {
+        "type": "router",
+        "routes": [
+            {"scene": "w6_appearance_high", "conditions": {"min_stats": {"appearance": 9}}},
+            {"scene": "w6_appearance_low", "conditions": {"max_stats": {"appearance": 6}}},
+            {"scene": "w6_appearance_normal", "conditions": {}}
+        ]
+    },
+    "w6_appearance_high": {
+        "text": "即使經過考前熬夜，你的皮膚依然打理得很好。\n在校園散步時，有其他系的女同學主動找你問路（其實是想要 IG）。露比 在旁邊看到後酸溜溜地說：「嘖嘖，電機系的帥哥就是不一樣，考試都沒把你操醜。」",
+        "effects": {"npcs": {"childhood_friend": {"affection": 5}}},
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_invitations"}],
+        "no_time_cost": True
+    },
+    "w6_appearance_low": {
+        "text": "考完試後你顯得有些拉榻，頭髮亂糟糟的。\n阿翔 語重心長地跟你說：「兄弟，雖然考完試了，但你這副樣子，別人看到可能會以為你是哪來的流浪漢喔...」",
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_invitations"}],
+        "no_time_cost": True
+    },
+    "w6_appearance_normal": {
+        "text": "考完試，你看起來和往常一樣。",
+        "choices": [{"text": "繼續...", "next_scene": "w6_exam_invitations"}],
+        "no_time_cost": True
+    },
+    "w6_exam_invitations": {
+        "text": "🏆 期中考後的四個邀請 (分歧點)\n考試結束當晚，你的手機震動不停。這是一個重要的獎勵事件，你只能選擇一個參加：",
+        "choices": [
+            {"text": "舞梓琪的邀請： 「這次考卷有幾個爭議點，我想去圖書館查資料，你...要一起來嗎？」", "next_scene": "ending_ziqi", "requirements": {"min_stats": {"intelligence": 7}, "player_flags": ["chose_library_with_ziqi"]}},
+            {"text": "妍盤玉的邀請： 「新生盃名單要交了，陪我去體育組送件，順便一起吃個宵夜慶祝考完？」", "next_scene": "ending_panyu", "requirements": {"player_flags": ["joined_volleyball_team"], "min_stats": {"stamina": 60}}},
+            {"text": "露比的邀請： 「我爸媽這週末不在家，來我家打新的 3A 大作！不准拒絕，我有買你愛吃的炸雞！」", "next_scene": "ending_ruby", "requirements": {"min_stats": {"appearance": 9}, "npcs": {"childhood_friend": {"min_affection": 30}}}},
+            {"text": "Selina 的邀請： 「我們咖啡廳這週末有新品試吃活動，缺一個『試吃員』，我覺得你很適合，來幫我試味道好嗎？」", "next_scene": "ending_selina", "requirements": {"min_stats": {"wealth": 3000}, "player_flags": ["met_selina"]}}
+        ]
+    },
+
+    # --- 結局 ---
+    "ending_ziqi": {
+        "text": "🌹 結局一：圖書館的靜謐頻率（舞梓琪 篇）\n【邀請：在期中考後的圖書館對答案】\n當最後一盞自修室的燈熄滅，你與舞梓琪並肩走出圖書館。校園的晚風吹散了連日考試的燥熱。\n「其實...」梓琪停下腳步，看著教學大樓的燈火，「我以前覺得電機系只需要邏輯和公式。但這幾週看到你，明明累得要命，卻還能堅持下來，甚至還能幫我翻譜...」她從書包裡拿出一張精緻的音樂會門票。\n「這是鋼琴社的期中發表，我有一首獨奏。雖然你可能更喜歡電路圖，但...我希望那天你能來。」\n\n結局評語： 你用智慧與耐心敲開了冷感學霸的心扉。未來的四年，除了冰冷的課本，你還擁有了鋼琴的旋律與一位能與你並肩作戰的靈魂伴侶。",
+        "choices": []
+    },
+    "ending_panyu": {
+        "text": "🏐 結局二：排球場上的並肩跳躍（妍盤玉 篇）\n【邀請：送件後的宵夜慶祝】\n在中原夜市的喧鬧聲中，妍盤玉咬著地瓜球，開心地跟你擊掌。「嘿！剛才體育組老師說，我們的新生盃名單通過了！你是我們班唯一的先發男球員喔！」\n她看著你，眼神中閃爍著運動員特有的熱情。「說實話，剛開學時我以為你只是個會讀書的宅男，沒想到你體力這麼好，接球也越來越穩了。」她突然湊近，在你耳邊輕聲說：「以後的每場比賽，你都要負責在後排罩我喔，拍檔！」\n\n結局評語： 你證明了電機系男生也能擁有陽光的體魄。在充滿汗水與笑聲的排球場上，你贏得了全系最活潑女孩的信任與依賴。",
+        "choices": []
+    },
+    "ending_ruby": {
+        "text": "🎮 結局三：從青梅竹馬到唯一的依靠（露比 篇）\n【邀請：去露比家打 3A 大作】\n遊戲機的風扇嗡嗡作響，露比盤腿坐在沙發上，專注地盯著螢幕。「快！[主角名]！開大招啊！你要是掛了，我也玩不下去啦！」\n最終魔王倒下，露比興奮地轉身抱住你，隨即又臉紅地放開。「咳...沒想到隔了這麼多年，我們配合得還是這麼好。電機系的課真的很累，但想到每天進教室都能看到你坐在那裡，我就覺得好像也沒那麼難熬了。」她靠在你的肩頭，「以後...不准再跟我失去聯繫了，知道嗎？」\n\n結局評語： 繞了一大圈，最好的其實一直在身邊。你與露比在繁重的課業中找到了彼此最舒服的相處模式，那是誰也無法取代的默契。",
+        "choices": []
+    },
+    "ending_selina": {
+        "text": "☕ 結局四：跨越科系的甜蜜頻率（Selina 篇）\n【邀請：咖啡廳的甜點試吃員】\n木匠咖啡廳的一角，Selina 緊張地看著你吃下她研發的新產品。「怎麼樣？會太甜嗎？這是我特別為了『勞累的電機系學生』設計的草莓舒芙蕾喔！」\n看著你滿意的表情，她開心地笑了，拿出素描本迅速地畫下你吃東西的樣子。「商設系的作業真的很煩，但每次在店裡看到你，我就覺得靈感又回來了。你是我的專屬模特兒，也是我最棒的避風港。」她遞給你一張集點卡，上面已經蓋滿了心形印章，「這張卡，只有你能用一輩子喔。」\n\n結局評語： 你在理性的電機世界中，保留了一份感性的浪漫。Selina 的甜點與設計感，為你原本可能枯燥的大學生活抹上了最繽紛的色彩。",
+        "choices": []
+    },
+
+    "ending_sudden_death": {
+        "text": "【隱藏結局：猝死】\n你感到一陣天旋地轉，眼前發黑。連續的熬夜、不規律的飲食、以及繁重的課業壓力，終於壓垮了你的身體。在你失去意識前的最後一刻，你彷彿看到了大學錄取通知書，那曾經是你一切夢想的開端... 遊戲結束。",
+        "choices": []
+    },
+ 
+
+    "final_ending": {"type": "final_eval"},
+    "ending_perfect": {"text": "結局：完美人生..."},
+    "ending_love_lost_friend": {"text": "結局：遺失的友情..."},
+    "ending_scholar": {"text": "結局：孤高的學者..."},
+}
+
+# --- 角色創建 ---
+def character_creation():
+    stats = {"wealth": 2000, "intelligence": 3, "appearance": 3, "height": 160}
+    points = random.randint(8, 13)
+    stat_names = {"1": "appearance", "2": "wealth", "3": "intelligence", "4": "height"}
+    stat_display_names = {"appearance": "顏值", "wealth": "財富", "intelligence": "智慧", "height": "身高"}
+    
+    while True:
+        os.system('cls' if os.name == 'nt' else 'clear')
+        term_width = os.get_terminal_size().columns
+        
+        title = "創建你的角色"
+        lines = [f"你共有 {colors['system']}{points}{Style.RESET_ALL} 點可以分配。"]
+        lines.append("-" * 10)
+        for key, name in stat_display_names.items():
+            unit = ''
+            if key == 'height':
+                unit = 'cm'
+            elif key == 'wealth':
+                unit = '元'
+            lines.append(f"{name}: {stats[key]}{unit}")
+        lines.append("-" * 10)
+        lines.append("增加屬性：")
+        lines.append(f"  {colors['prompt']}1. 顏值 (+1){Style.RESET_ALL}    {colors['prompt']}2. 財富 (+500元){Style.RESET_ALL}")
+        lines.append(f"  {colors['prompt']}3. 智慧 (+1){Style.RESET_ALL}    {colors['prompt']}4. 身高 (+5cm){Style.RESET_ALL}")
+        lines.append("減少屬性：")
+        lines.append(f"  {colors['prompt']}5. 顏值 (-1){Style.RESET_ALL}    {colors['prompt']}6. 財富 (-500元){Style.RESET_ALL}")
+        lines.append(f"  {colors['prompt']}7. 智慧 (-1){Style.RESET_ALL}    {colors['prompt']}8. 身高 (-5cm){Style.RESET_ALL}")
+        lines.append("-" * 10)
+        lines.append(f"{colors['system']}C. 完成創建{Style.RESET_ALL}")
+        
+        draw_box(title, lines, term_width)
+        
+        choice = input(colors["prompt"] + "> " + Style.RESET_ALL).lower()
+        
+        if choice == 'c':
+            if points >= 0: break
+        
+        if choice in ['1', '2', '3', '4']: # Add points
+            if points > 0:
+                stat_to_change = stat_names[choice]
+                if stat_to_change == 'height':
+                    stats[stat_to_change] += 5
+                elif stat_to_change == 'wealth':
+                    stats[stat_to_change] += 500
+                else:
+                    stats[stat_to_change] += 1
+                points -= 1
+        elif choice in ['5', '6', '7', '8']: # Subtract points
+            stat_to_change = {"5": "appearance", "6": "wealth", "7": "intelligence", "8": "height"}[choice]
+            min_value = 1
+            if stat_to_change == 'height':
+                min_value = 165
+            elif stat_to_change == 'wealth':
+                min_value = 500 # Or some other minimum
+            
+            if stats[stat_to_change] > min_value:
+                if stat_to_change == 'height':
+                    stats[stat_to_change] -= 5
+                elif stat_to_change == 'wealth':
+                    stats[stat_to_change] -= 500
+                else:
+                    stats[stat_to_change] -= 1
+                points += 1
+    
+    final_stats = {"inventory": [], "stamina": 100, "max_stamina": 100, "flags": []}
+    final_stats.update(stats)
+    return final_stats
+
+# --- 遊戲主引擎 ---
+def main():
+    global player_stats, npc_stats, time_stats
+    init(autoreset=True)
+    try: sys.stdout.reconfigure(encoding='utf-8') # 強制設定輸出編碼
+    except: pass
+    
+    current_scene_id = "game_intro"
+    info_message = ""
+    loaded_game = False
+    if os.path.exists(SAVE_FILE):
+        if input(colors["system"] + "是否讀取之前的存檔？(y/n): " + Style.RESET_ALL).lower() == 'y':
+            p, n, t, c = load_game()
+            if p: 
+                player_stats, npc_stats, time_stats, current_scene_id = p, n, t, c
+                info_message = "讀取成功！"
+                loaded_game = True
+            else:
+                info_message = "讀取失敗！將開始新遊戲。"
+    
+    if not loaded_game:
+        display_girl_profiles() # 顯示女主角設定
+        player_stats = character_creation()
+
+    term_width = os.get_terminal_size().columns
+
+    while True:
+        os.system('cls' if os.name == 'nt' else 'clear')
+
+        scene = story.get(current_scene_id)
+        if not scene: print(f"錯誤：找不到場景 {current_scene_id}！"); break
+        
+        scene_type = scene.get("type")
+        if scene_type == "router":
+            next_scene_found = False
+            for route in scene["routes"]:
+                conditions_met = True
+                conds = route["conditions"]
+
+                if "npcs" in conds:
+                    for npc_name, reqs in conds["npcs"].items():
+                        if "min_affection" in reqs and npc_stats[npc_name]["affection"] < reqs["min_affection"]:
+                            conditions_met = False
+                            break
+                if not conditions_met:
+                    continue
+
+                if "player_flags" in conds:
+                    if not all(flag in player_stats["flags"] for flag in conds["player_flags"]):
+                        conditions_met = False
+                if not conditions_met:
+                    continue
+
+                if "min_stats" in conds:
+                    for stat, value in conds["min_stats"].items():
+                        if player_stats.get(stat, 0) < value:
+                            conditions_met = False
+                            break
+                if not conditions_met:
+                    continue
+
+                if "random_chance" in conds:
+                    if random.random() >= conds["random_chance"]:
+                        conditions_met = False
+                if not conditions_met:
+                    continue
+                
+                # If all conditions passed
+                if conditions_met:
+                    current_scene_id = route["scene"]
+                    next_scene_found = True
+                    break
+            
+            if not next_scene_found:
+                current_scene_id = scene["routes"][-1]["scene"]
+            continue
+        if scene_type == "final_eval":
+            if npc_stats["top_student_girl"]["affection"] >= 15 and npc_stats["friend"]["affection"] > 0: current_scene_id = "ending_perfect"
+            elif npc_stats["top_student_girl"]["affection"] >= 15 and npc_stats["friend"]["affection"] <= 0: current_scene_id = "ending_love_lost_friend"
+            else: current_scene_id = "ending_scholar"
+            continue
+        if scene_type == "event_trigger":
+            if scene["event_type"] == "exam":
+                current_scene_id = scene["pass_scene"] if player_stats["intelligence"] >= scene["pass_threshold"] else scene["fail_scene"]
+                continue
+
+        day_of_week = DAYS_OF_WEEK[time_stats['day_of_week_index']]
+        time_str = f"📅 第 {time_stats['week']} 週, 星期{day_of_week}, {PERIODS[time_stats['period_index']]}"
+        draw_box("戀愛模擬器", [time_str], term_width)
+        state_lines = prepare_state_lines(player_stats, npc_stats)
+        draw_box("狀態", state_lines, term_width)
+        if info_message: draw_box("通知", textwrap.wrap(info_message, width=int((term_width - 8)/2)), term_width); info_message = ""
+        scene_lines = textwrap.wrap(scene["text"], width=int((term_width - 8)/2)) # 縮減寬度以容納中文字
+        draw_box("劇情", scene_lines, term_width)
+
+        if "choices" not in scene or not scene["choices"]: print("遊戲結束。"); break
+        
+        while True:
+            choice_map = {} # Map visible choice number to the actual choice object
+            choice_lines = [] # Initialize choice_lines
+            visible_choice_num = 1
+            for choice_index, choice in enumerate(scene["choices"]): # Iterate through all choices, original order
+                reqs = choice.get("requirements", {})
+                can_choose = True
+                locked_message_parts = []
+
+                for stat, value in reqs.get("min_stats", {}).items():
+                    if player_stats.get(stat, 0) < value:
+                        can_choose = False
+                        # Display stat names in Chinese
+                        stat_display_name = {"stamina": "體力", "intelligence": "智慧", "appearance": "顏值", "height": "身高", "wealth": "財富"}.get(stat, stat)
+                        locked_message_parts.append(f"需要 {stat_display_name} >= {value}")
+                for stat, value in reqs.get("max_stats", {}).items():
+                    if player_stats.get(stat, 0) > value:
+                        can_choose = False
+                        stat_display_name = {"stamina": "體力", "intelligence": "智慧", "appearance": "顏值", "height": "身高", "wealth": "財富"}.get(stat, stat)
+                        locked_message_parts.append(f"需要 {stat_display_name} <= {value}")
+                for npc_key, req in reqs.get("npcs", {}).items():
+                    for req_type, value in req.items():
+                        if req_type == "min_affection" and npc_stats[npc_key]["affection"] < value:
+                            can_choose = False
+                            # Use girl's display name for better UX
+                            girl_name = next((g['name'] for g in GIRL_PROFILES if g['key'] == npc_key), npc_key)
+                            locked_message_parts.append(f"需要 {girl_name} 好感度: {value}")
+
+                if can_choose:
+                    choice_lines.append(f"{colors['prompt']}{visible_choice_num}. {choice['text']}{Style.RESET_ALL}")
+                    choice_map[visible_choice_num] = choice
+                else:
+                    locked_reason = ", ".join(locked_message_parts) if locked_message_parts else "條件不足"
+                    choice_lines.append(f"{colors['locked']}{visible_choice_num}. {choice['text']} ({locked_reason}){Style.RESET_ALL}")
+                visible_choice_num += 1
+
+            choice_lines.append(colors["system"] + "---"); choice_lines.append(colors["system"] + "S.儲存 / L.讀取")
+            draw_box("選擇", choice_lines, term_width)
+            player_input = input(colors["prompt"] + "> " + Style.RESET_ALL).lower()
+
+            if player_input == 's': save_game(player_stats, npc_stats, time_stats, current_scene_id); info_message = "遊戲已儲存！"; break
+            if player_input == 'l':
+                p, n, t, c = load_game();
+                if p: player_stats, npc_stats, time_stats, current_scene_id = p, n, t, c; info_message = "讀取成功！"; break
+                else: info_message = "讀取失敗！"; continue
+            try:
+                choice_num = int(player_input);
+                if choice_num in choice_map: # Check if the entered number maps to an available choice
+                    chosen_option = choice_map[choice_num]
+                    break
+                else:
+                    info_message = "無效的選項或該選項目前無法選擇。"
+            except ValueError:
+                info_message = "請輸入數字或 S/L"
+
+        if info_message: continue
+
+        effects = chosen_option.get("effects", {})
+        for stat, value in effects.get("player", {}).items():
+            if stat == 'stamina':
+                player_stats[stat] = min(player_stats.get('max_stamina', 100), player_stats.get(stat, 0) + value)
+            else:
+                player_stats[stat] = player_stats.get(stat, 0) + value
+            info_message += f"[{stat} {'+' if value > 0 else ''}{value}] "
+        
+        if player_stats.get('stamina', 0) <= 0:
+            current_scene_id = 'ending_sudden_death'
+            continue
+
+        for npc, stats in effects.get("npcs", {}).items():
+            for stat, value in stats.items():
+                npc_stats[npc][stat] += value
+                if stat == "affection": info_message += f"[{npc} 好感度 {'+' if value > 0 else ''}{value}] "
+        for flag in effects.get("add_flags", []):
+            if flag not in player_stats["flags"]:
+                player_stats["flags"].append(flag)
+        for flag in effects.get("remove_flags", []):
+            if flag in player_stats["flags"]:
+                player_stats["flags"].remove(flag)
+        
+        next_scene = chosen_option.get("next_scene")
+
+        next_scene = chosen_option.get("next_scene")
+
+        # Advance time period unless the scene was timeless
+        if not scene.get("no_time_cost"):
+            time_stats["period_index"] += 1
+        
+        # If the next scene would be the removed daily_router, or if the day has ended,
+        # we need to find the next scheduled event.
+        if next_scene == "daily_router" or time_stats["period_index"] >= len(PERIODS):
+            
+            # If period rolled over, reset to morning for the *new* day.
+            # If daily_router, it means we are effectively ending current day and moving to next.
+            time_stats["period_index"] = 0 
+            
+            # Advance to the "next" calendar day. This is the first day we will check for an event.
+            time_stats["day_of_week_index"] += 1
+            if time_stats["day_of_week_index"] >= len(DAYS_OF_WEEK):
+                time_stats["day_of_week_index"] = 0
+                time_stats["week"] += 1
+
+            plot_days_passed = 0 # This will count the number of "plot days" until the next event
+
+            # Loop to find the next event day
+            while True:
+                if time_stats["week"] > 6:  # End of the game condition
+                    current_scene_id = "final_ending"
+                    break
+
+                event_key = f"W{time_stats['week']}_D{time_stats['day_of_week_index']}"
+                
+                # Check for event on the *current calendar day*
+                if event_key in scheduled_events:
+                    # If this is a scheduled event day, increment plot_days_passed.
+                    plot_days_passed += 1 
+                    current_scene_id = scheduled_events[event_key]
+                    break # Found the next event day
+
+                # If no event on this calendar day, just advance to the next calendar day
+                time_stats["day_of_week_index"] += 1
+                if time_stats["day_of_week_index"] >= len(DAYS_OF_WEEK):
+                    time_stats["day_of_week_index"] = 0
+                    time_stats["week"] += 1
+            
+            # Apply stamina recovery based on plot_days_passed
+            total_recovery = plot_days_passed * STAMINA_RECOVERY_ON_SLEEP
+            player_stats["stamina"] = min(player_stats.get("max_stamina", 100), player_stats.get("stamina", 0) + total_recovery)
+            
+            if plot_days_passed > 0:
+                info_message += f"時間快速流逝了 {plot_days_passed} 天，體力恢復了 {total_recovery} 點！"
+            
+            continue # Restart the main loop to process the new scene
+        
+        else:  # Normal transition on the same day to a specific scene
+            current_scene_id = next_scene
+
+if __name__ == "__main__":
+    try: main()
+    except KeyboardInterrupt: print("\n\n遊戲已中斷。"); sys.exit(0)
+    except Exception as e: print(f"\n\n發生未預期的錯誤: {e}"); import traceback; traceback.print_exc()
